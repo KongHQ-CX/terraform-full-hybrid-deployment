@@ -1,0 +1,485 @@
+image:
+  repository: "${kong_image_repository}"
+  tag: "${kong_image_tag}"
+  pullPolicy: Always
+
+migrations:
+  preUpgrade: ${kong_run_upgrade_migrations}
+  postUpgrade: ${kong_run_upgrade_migrations}
+
+plugins:
+  configMaps:
+%{ for custom_plugin in custom_plugins ~}
+  - name: kong-plugin-${custom_plugin}
+    pluginName: ${custom_plugin}
+%{ endfor ~}
+
+customEnv:
+  %{ for key, val in custom_env }
+  ${ key }: "${ val }"
+  %{ endfor }
+
+# Annotation to be added to Kong pods
+podAnnotations:
+  kuma.io/gateway: enabled
+  traffic.sidecar.istio.io/includeInboundPorts: ""
+  prometheus.io/scrape: 'true'
+  prometheus.io/path: '/metrics'
+  prometheus.io/port: '8100'
+
+%{ if install_cluster_issuing_ca }
+%{ if is_control_plane }
+certificates:
+  enabled: true
+  clusterIssuer: kong-clustering-ca-issuer
+  cluster:
+    enabled: true
+    commonName: "${control_plane_deployment_name}-kong-cluster"
+    dnsNames:
+    - "${control_plane_deployment_name}-kong-cluster"
+    - "${control_plane_deployment_name}-kong-cluster.svc"
+    - "${control_plane_deployment_name}-kong-cluster.svc.cluster.local"
+    - "${control_plane_deployment_name}-kong-clustertelemetry"
+    - "${control_plane_deployment_name}-kong-clustertelemetry.svc"
+    - "${control_plane_deployment_name}-kong-clustertelemetry.svc.cluster.local"
+
+  admin:
+    enabled: false
+  proxy:
+    enabled: false
+  portal:
+    enabled: false
+%{ else }
+certificates:
+  enabled: true
+  clusterIssuer: kong-clustering-ca-issuer
+  cluster:
+    enabled: true
+    commonName: "${data_plane_deployment_name}-kong-cluster"
+    dnsNames:
+    - "${data_plane_deployment_name}-kong-cluster"
+    - "${data_plane_deployment_name}-kong-cluster.svc"
+    - "${data_plane_deployment_name}-kong-cluster.svc.cluster.local"
+
+  admin:
+    enabled: false
+  proxy:
+    enabled: false
+  portal:
+    enabled: false
+%{ endif }
+%{ else }
+certificates:
+  enabled: false
+%{ endif }
+
+env:
+  proxy_access_log: "off"
+
+  audit_log: "${audit_log}"
+  untrusted_lua: "sandbox"
+
+  %{ if debug_listen_enabled }
+  debug_listen: "0.0.0.0:8200"
+  debug_listen_local: "on"
+  %{ endif }
+
+  # proxy_listen: "0.0.0.0:8443 ssl http2, 0.0.0.0:8444 ssl http2, 0.0.0.0:8445 ssl http2"
+
+  %{ if use_database || is_control_plane }
+  database: "postgres"
+  pg_database: kong
+  pg_user: kong
+  pg_password: kong
+  pg_host: "${control_plane_deployment_name}-postgresql"
+
+  # default kong_admin password
+  password: '${ kong_rbac_admin_password }'
+
+  audit_log: "${ audit_log }"
+  %{ else }
+  database: "off"
+  %{ endif }
+
+  %{ if (!is_data_plane || !is_hybrid) && !is_konnect }
+  admin_api_uri: "https://${ingress_prefix}-admin${ingress_domain}"
+  admin_gui_api_url: "https://${ingress_prefix}-admin${ingress_domain}"
+  admin_gui_url: "https://${ingress_prefix}-manager${ingress_domain}"
+  admin_api_protocol: "https"
+
+  portal_api_url: "https://${ingress_prefix}-portalapi${ingress_domain}"
+  portal_gui_protocol: "https"
+  %{ endif }
+  
+  %{ if is_hybrid || is_konnect }
+
+  # control plane setup
+  %{ if is_control_plane }
+  %{ if !is_kic }
+  enforce_rbac: "on"
+  admin_gui_auth: "basic-auth"
+  #admin_gui_auth: "openid-connect"
+  admin_gui_session_conf: '{ "cookie_domain": "${ingress_domain}", "cookie_name": "admin_session", "secret": "gjrmeaiog34pugmv84ugy9845nyoa378gp4u", "storage": "kong", "cookie_secure":true, "cookie_lifetime":599}'
+  %{ endif }
+
+  role: "control_plane"
+
+  %{ if !install_cluster_issuing_ca }
+  cluster_cert: "/etc/secrets/kong-cluster-cert/tls.crt"
+  cluster_cert_key: "/etc/secrets/kong-cluster-cert/tls.key"
+  %{ endif }
+  %{ endif } # end control_plane setup
+
+  # data plane setup
+  %{ if is_data_plane }
+  role: "data_plane"
+
+  %{ if is_konnect }
+  cluster_mtls: pki
+  cluster_control_plane: ${konnect_cluster_host}:443
+  cluster_server_name: ${konnect_cluster_host}
+  cluster_telemetry_endpoint: ${konnect_telemetry_host}:443
+  cluster_telemetry_server_name: ${konnect_telemetry_host}
+  cluster_cert: /etc/secrets/kong-cluster-cert-${release_id}/tls.crt
+  cluster_cert_key: /etc/secrets/kong-cluster-cert-${release_id}/tls.key
+  konnect_mode: "on"
+  vitals: "off"
+  %{ else }
+
+  %{ if !install_cluster_issuing_ca }
+  cluster_cert: "/etc/secrets/kong-cluster-cert/tls.crt"
+  cluster_cert_key: "/etc/secrets/kong-cluster-cert/tls.key"
+  %{ else }
+  cluster_mtls: pki
+  %{ endif } # end if install cluster issuing ca
+
+  cluster_control_plane: "${control_plane_deployment_name}-kong-cluster:8005"
+  cluster_telemetry_endpoint: "${control_plane_deployment_name}-kong-clustertelemetry:8006"
+  %{ endif } # end data_plane konnect
+  %{ endif } # end data_plane setup
+  
+  %{ else } # else not clustering - traditional mode
+  %{ if !is_kic }
+  enforce_rbac: "off"
+  %{ endif }
+
+  %{ endif } # end clustering
+
+  tracing_instrumentations: "all"
+  tracing_sampling_rate: "1.0"
+
+  trusted_ips: "${trusted_ip_cidr}"
+  real_ip_recursive: "on"
+
+  %{ if ingress_vendor == "aws-alb" }
+  real_ip_header: "x-forwarded-for"
+  %{ endif }
+
+  # Vault default configurations
+  vault_hcv_host: "vault-internal"
+  vault_hcv_port: 8200
+  vault_hcv_mount: "secret"
+  vault_hcv_kv: "v2"
+  vault_hcv_protocol: "http"
+  vault_hcv_auth_method: "token"
+  vault_hcv_token: "root-token"
+
+  # Misc shared
+  untrusted_lua: '${untrusted_lua}'
+  log_level: "${log_level}"
+  headers: "${headers}"
+  port_maps: "443:8443"
+
+%{ if run_as_root }
+securityContext:
+  runAsUser: 0
+%{ endif }
+
+secretVolumes:
+%{ if is_hybrid && !install_cluster_issuing_ca }
+- "kong-cluster-cert"
+%{ endif }
+%{ if is_konnect }
+- "kong-cluster-cert-${release_id}"
+%{ endif }
+
+replicaCount: ${replicas}
+
+%{ if dbless_config != "" }
+dblessConfig:
+  config: |
+    ${dbless_config}
+%{ endif }
+
+%{ if ((is_hybrid && !is_control_plane) && !is_konnect) || is_kic || is_konnect }
+proxy:
+  enabled: true
+  type: ClusterIP
+  annotations:
+    %{ if ingress_vendor == "traefik" }
+    traefik.ingress.kubernetes.io/service.serversscheme: https
+    %{ endif }
+
+  http:
+    enabled: false
+    servicePort: 8000
+    containerPort: 8000
+  tls:
+    enabled: true
+    %{ if ingress_vendor == "aws-nlb" }
+    servicePort: 443
+    containerPort: 8443
+    %{ else }
+    servicePort: 8443
+    containerPort: 8443
+    %{ endif }
+    %{ if ingress_vendor == "aws-alb" }
+    servicePort: 443
+    containerPort: 8443
+    parameters: []
+    %{ endif }
+  ingress:
+    enabled: true
+    hostname: ${ingress_prefix}${ingress_domain}
+    path: "/"
+    %{ if ingress_vendor == "aws-alb" }
+    pathType: "Prefix"
+    %{ endif }
+    annotations:
+      %{ if ingress_vendor == "nginx" }
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      %{ endif }
+      %{ for key, val in ingress_annotations }
+      ${ key }: "${ val }"
+      %{ endfor }
+%{ else }
+proxy:
+  enabled: false
+  ingress:
+    enabled: false
+%{ endif }
+
+%{ if (is_control_plane || !is_hybrid) && !is_konnect }
+admin:
+  enabled: true
+  type: ClusterIP
+  annotations:
+    %{ if ingress_vendor == "traefik" }
+    traefik.ingress.kubernetes.io/service.serversscheme: https
+    %{ endif }
+  http:
+    enabled: false
+    servicePort: 8001
+    containerPort: 8001
+  tls:
+    enabled: true
+    servicePort: 8444
+    containerPort: 8444
+    parameters: []
+  ingress:
+    enabled: true
+    hostname: ${ingress_prefix}-admin${ingress_domain}
+    %{ if ingress_vendor == "aws-alb" }
+    path: "/*"
+    %{ endif }
+    annotations:
+      %{ if ingress_vendor == "nginx" }
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      %{ endif }
+      %{ for key, val in ingress_annotations }
+      ${ key }: "${ val }"
+      %{ endfor }
+
+manager:
+  enabled: true
+  type: ClusterIP
+  annotations:
+    %{ if ingress_vendor == "traefik" }
+    traefik.ingress.kubernetes.io/service.serversscheme: https
+    %{ endif }
+  http:
+    enabled: true
+    servicePort: 8002
+    containerPort: 8002
+  tls:
+    enabled: true
+    containerPort: 8445
+    servicePort: 8445
+    parameters: []
+  ingress:
+    enabled: true
+    hostname: ${ingress_prefix}-manager${ingress_domain}
+    path: "/"
+    %{ if ingress_vendor == "aws-alb" }
+    pathType: "Prefix"
+    %{ endif }
+    annotations:
+      %{ if ingress_vendor == "nginx" }
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      %{ endif }
+      %{ for key, val in ingress_annotations }
+      ${ key }: "${ val }"
+      %{ endfor }
+
+portal:
+  enabled: true
+  type: ClusterIP
+  annotations:
+    %{ if ingress_vendor == "traefik" }
+    traefik.ingress.kubernetes.io/service.serversscheme: https
+    %{ endif }
+  http:
+    enabled: false
+    servicePort: 8003
+    containerPort: 8003
+  tls:
+    enabled: true
+    containerPort: 8446
+    servicePort: 8446
+    parameters: []
+  ingress:
+    enabled: true
+    hostname: ${ingress_prefix}-portal${ingress_domain}
+    path: "/"
+    %{ if ingress_vendor == "aws-alb" }
+    pathType: "Prefix"
+    %{ endif }
+    annotations:
+      %{ if ingress_vendor == "nginx" }
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      %{ endif }
+      %{ for key, val in ingress_annotations }
+      ${ key }: "${ val }"
+      %{ endfor }
+
+portalapi:
+  enabled: true
+  type: ClusterIP
+  annotations:
+    %{ if ingress_vendor == "traefik" }
+    traefik.ingress.kubernetes.io/service.serversscheme: https
+    %{ endif }
+  http:
+    enabled: false
+    servicePort: 8004
+    containerPort: 8004
+  tls:
+    enabled: true
+    containerPort: 8447
+    servicePort: 8447
+    parameters: []
+  ingress:
+    enabled: true
+    hostname: ${ingress_prefix}-portalapi${ingress_domain}
+    path: "/"
+    %{ if ingress_vendor == "aws-alb" }
+    pathType: "Prefix"
+    %{ endif }
+    annotations:
+      %{ if ingress_vendor == "nginx" }
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      %{ endif }
+      %{ for key, val in ingress_annotations }
+      ${ key }: "${ val }"
+      %{ endfor }
+
+cluster:
+  enabled: true
+  tls:
+    enabled: true
+    servicePort: 8005
+    containerPort: 8005
+
+clustertelemetry:
+  enabled: true
+  tls:
+    enabled: true
+    servicePort: 8006
+    containerPort: 8006
+%{ else }
+admin:
+  enabled: false
+
+manager:
+  enabled: false
+
+portal:
+  enabled: false
+
+portalapi:
+  enabled: false
+
+%{ if install_cluster_issuing_ca }
+cluster:
+  enabled: true
+%{ endif }
+
+clustertelemetry:
+  enabled: false
+%{ endif }
+
+livenessProbe:
+  failureThreshold: 20
+  httpGet:
+    # path: /status/ready
+    path: /status
+    port: status
+    scheme: HTTP
+  initialDelaySeconds: 3
+  periodSeconds: 1
+  successThreshold: 1
+  timeoutSeconds: 2
+
+readinessProbe:
+  failureThreshold: 20
+  httpGet:
+    # path: /status/ready
+    path: /status
+    port: status
+    scheme: HTTP
+  initialDelaySeconds: 3
+  periodSeconds: 1
+  successThreshold: 1
+  timeoutSeconds: 2
+
+enterprise:
+  enabled: true
+  %{ if !is_konnect }
+  license_secret: kong-enterprise-license
+  %{ endif }
+  vitals:
+    enabled: ${vitals_enabled ? true : false}
+  portal:
+    enabled: true
+  rbac:
+    enabled: false
+  smtp:
+    enabled: false
+
+postgresql:
+  %{ if use_database || is_control_plane }
+  enabled: true
+  auth:
+    username: kong
+    password: kong
+  image:
+    tag: ${ postgres_tag }
+  %{ else }
+  enabled: false
+  %{ endif }
+
+ingressController:
+  enabled: ${is_kic}
+  installCRDs: false
+  %{ if is_kic && kic_debug_mode }
+  env:  
+    profiling: "true"
+    log_level: "trace"
+  %{ endif }
+
+extraObjects:
+${echo_server}
+%{ if is_kic }
+${kic_extra_objects}
+%{ endif }
+${extra_objects}

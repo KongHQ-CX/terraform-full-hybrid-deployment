@@ -1,0 +1,16 @@
+_format_version: "3.0"
+
+services:
+  - name: "echo-server"
+    host: "echo-server"
+    port: 8080
+    path: "/"
+    protocol: "http"
+
+    routes:
+      - name: "echo-server-ALL"
+        paths:
+          - "~/echo$"
+        protocols:
+          - "https"
+          - "http"

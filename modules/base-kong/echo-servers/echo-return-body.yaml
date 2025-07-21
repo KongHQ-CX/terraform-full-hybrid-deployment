@@ -1,0 +1,96 @@
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: echo-server
+    labels:
+      app: echo-server
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: echo-server
+    template:
+      metadata:
+        labels:
+          app: echo-server
+      spec:
+        containers:
+        - name: echo-server
+          image: python:3.8
+          env:
+          - name: PYTHONUNBUFFERED
+            value: "1"
+          command:
+          - sh
+          args:
+          - -c
+          - pip install flask; python3 /data/script/app.py
+          ports:
+          - name: http
+            containerPort: 8080
+          volumeMounts:
+          - name: script-volume
+            mountPath: /data/script
+        volumes:
+        - name: script-volume
+          configMap:
+            name: echo-server-script
+
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: echo-server
+    labels:
+      app: echo-server
+  spec:
+    ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    selector:
+      app: echo-server
+    type: ClusterIP
+
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: echo-server-script
+  data:
+    app.py: |
+      #!/bin/python3
+      import json
+      from flask import Flask, request, Response
+
+      app = Flask(__name__)
+
+      def create_response(path, method, headers, body):
+        decompressed = body
+        try:
+          decompressed = gzip.decompress(decompressed)
+          decompressed = str(decompressed, encoding='utf-8')
+        except:
+          decompressed = body
+
+        try:
+          json_body = json.loads(decompressed)
+        except:
+          json_body = "NOT_JSON"
+
+        response = {
+          "path": path,
+          "method": method,
+          "headers": dict(headers),
+          "body": (decompressed and decompressed.decode("utf-8")) or "EMPTY",
+          "json": json_body
+        }
+
+        return Response(json.dumps(response), 200, mimetype='application/json')
+
+      @app.route('/', defaults={'path': ''}, methods = ['GET', 'POST'])
+      @app.route('/<path:path>', methods = ['GET', 'POST'])
+      def catch_all(path):
+        return create_response(path, request.method, request.headers, request.get_data())
+
+      if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=8080)

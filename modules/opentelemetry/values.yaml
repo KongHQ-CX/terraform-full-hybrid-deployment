@@ -1,0 +1,21 @@
+provisionDataStore:
+  cassandra: false
+  elasticsearch: false
+
+allInOne:
+  enabled: true
+  service:
+    headless: ${headless_jaeger_service}
+  ingress:
+    enabled: true
+    hosts:
+    - "jaeger${ingress_domain}"
+
+storage:
+  type: "none"
+agent:
+  enabled: false
+collector:
+  enabled: false
+query:
+  enabled: false
